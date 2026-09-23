@@ -155,3 +155,66 @@ def wait_until(fn, timeout, interval=3, description="condition"):
             return last_result
         time.sleep(interval)
     raise AssertionError(f"timed out after {timeout}s waiting for: {description}")
+
+
+def open_clip_details(page, clip_thumbnail_src_fragment):
+    """
+    Navigate into a clip's /clipdetails/<id> page by double-clicking its
+    thumbnail wherever it's currently rendered (dashboard, search
+    results - anywhere Flow2/components/Clip/Clip.js renders one).
+
+    This is a *double*-click deliberately, not a single click: Clip.js
+    wires a single click to a selection/highlight callback (for
+    multi-select batch actions like add-to-cart) and only a double
+    click to actual navigation - a single click, or a dispatched
+    'click' MouseEvent, changes nothing about the current route. Found
+    by reading Clip.js's own onClick wiring after single clicks
+    (including raw dispatched mouse events) reproducibly did nothing.
+
+    `clip_thumbnail_src_fragment` narrows to one specific clip's <img>
+    by a substring of its thumbnail.cgi URL (e.g. a filename) - the
+    caller decides which clip, this helper only drives the click.
+    """
+    box = page.evaluate(
+        """(fragment) => {
+            const img = Array.from(document.querySelectorAll('img'))
+                .find(i => i.src.includes('thumbnail.cgi') && i.src.includes(fragment));
+            if (!img) return null;
+            const r = img.getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }""",
+        clip_thumbnail_src_fragment,
+    )
+    assert box, f'no rendered thumbnail found containing "{clip_thumbnail_src_fragment}"'
+    page.mouse.dblclick(box["x"], box["y"])
+    page.wait_for_url("**/clipdetails/**", timeout=15000)
+    page.wait_for_timeout(1500)
+
+
+def enter_metadata_edit_mode(page):
+    """Click the pencil icon that turns the clip detail page's read-only
+    metadata fields into editable inputs (Flow2/pages/Clip/ClipDetails.js)."""
+    page.locator("svg.fa-pen").first.click(force=True)
+    page.wait_for_timeout(1000)
+
+
+def save_metadata_edit(page):
+    """Click the save (floppy disk) icon that appears once in edit mode."""
+    page.locator("svg.fa-save").first.click(force=True)
+    page.wait_for_timeout(1500)
+
+
+def metadata_field_input(page, label_variants):
+    """
+    Locate an editable metadata input by the label text immediately
+    preceding it in the DOM (e.g. ["Titel", "Title"] to cover both
+    German and English locales - callers pass every label spelling
+    they want to accept). This is the field's on-screen label, part of
+    flow2's own fixed UI chrome, not a custom metadata field name -
+    safe across installs with different custom_metadata_def configs
+    (see README's design constraint). Browser XPath 1.0 has no regex
+    function, hence the explicit contains()-per-variant OR instead of
+    a single regex.
+    """
+    condition = " or ".join(f'contains(text(),"{v}")' for v in label_variants)
+    return page.locator(f"xpath=//*[{condition}]/following::input[1]")

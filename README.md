@@ -100,10 +100,22 @@ Pass extra `pytest` arguments after the image name, e.g.
   place; see this repo's git log around `65aef3f` / `22d6f9c` for the
   two real installation bugs it would have caught immediately instead
   of needing a manual, from-scratch investigation.
+- `test_clipdetails.py` - opens an existing clip's detail page
+  (`/clipdetails/<id>`, via a real double-click on its thumbnail - a
+  single click only selects it, see the module/`open_clip_details()`
+  docstrings for why that distinction matters for automation) and
+  checks its main image/video actually renders - this is a *third*,
+  separately-discovered instance of the "picture not found" bug class,
+  in a code path that builds its own thumbnail URL by hand instead of
+  calling `mediafile.getUrl()` (see commit `a802775`). It also drives
+  a full metadata edit-and-save round trip (enter edit mode, change
+  the title, save, then re-fetch the clip fresh from the API to
+  confirm the change actually persisted server-side rather than just
+  changing in the DOM) and restores the original value afterward.
 
 ## What's not covered yet
 
-Editing/saving metadata, projects/rooms, distribution/download links,
-admin pages, permission/granting edge cases, NVENC-specific transcode
-verification. Extend by adding a new `test_*.py` module following the
-same schema-agnostic rule above.
+Projects/rooms, distribution/download links, admin pages,
+permission/granting edge cases, NVENC-specific transcode verification.
+Extend by adding a new `test_*.py` module following the same
+schema-agnostic rule above.
