@@ -8,6 +8,11 @@ any one FlowCenter installation - point it at any flow2 instance
 host) via environment variables, and it builds and runs as its own
 Docker image, independent of `ubuntu26/Dockerfile.build`.
 
+See [`MANUAL.md`](MANUAL.md) for the full how-to (building, every
+environment variable, the web GUI, what each test checks, reading a
+failure, extending the suite). This file stays short - the reasoning
+behind the design choices.
+
 ## Why a separate image
 
 `ubuntu26/ui-tests/` (see its own `test_basic.py`) tests the *legacy*
