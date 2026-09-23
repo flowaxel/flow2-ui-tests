@@ -4,6 +4,14 @@
 # levels of traceback down is not a good first experience.
 set -euo pipefail
 
+# --webui (or FLOW2_WEBUI=1) starts the small web GUI (webui.py)
+# instead of running pytest directly - it collects the URL/credentials
+# itself via a form, so none of the env vars below are required for
+# this path. See README.md's "Web GUI" section.
+if [ "${1:-}" = "--webui" ] || [ "${FLOW2_WEBUI:-0}" = "1" ]; then
+    exec python webui.py
+fi
+
 missing=()
 [ -z "${FLOW2_URL:-}" ] && missing+=("FLOW2_URL")
 [ -z "${FLOW2_USER:-}" ] && missing+=("FLOW2_USER")

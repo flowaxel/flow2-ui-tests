@@ -14,10 +14,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium
 
-COPY conftest.py entrypoint.sh ./
+COPY conftest.py entrypoint.sh webui.py ./
 COPY test_login.py test_dashboard.py test_search.py test_upload.py test_clipdetails.py ./
 COPY fixtures/ ./fixtures/
 
 RUN chmod +x entrypoint.sh
+
+# Only used by `--webui`/FLOW2_WEBUI=1 mode (see entrypoint.sh) - the
+# default CLI mode (env vars + pytest) doesn't listen on anything.
+EXPOSE 8899
 
 ENTRYPOINT ["./entrypoint.sh"]

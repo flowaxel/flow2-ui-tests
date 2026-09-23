@@ -81,6 +81,34 @@ Optional environment variables:
 Pass extra `pytest` arguments after the image name, e.g.
 `docker run --rm -e ... flow2-ui-tests -k test_login -v`.
 
+## Web GUI
+
+For a tester who'd rather fill in a form than set environment
+variables and read a raw log: `--webui` (or `-e FLOW2_WEBUI=1`) starts
+a small Flask app instead of running pytest directly. It's the exact
+same test suite underneath - the form just collects the same
+URL/credentials/options the CLI takes as env vars, and the results
+page shows the same `pytest -v` output, live, while the run is in
+progress.
+
+```bash
+docker run --rm -p 8899:8899 flow2-ui-tests --webui
+# open http://localhost:8899
+```
+
+The form: flow2 URL, username, password, a TLS-trust checkbox, the
+upload timeout, and a checklist of which test modules to run (so a
+quick check doesn't have to wait for the slower upload round trip).
+Submitting starts the run in a background thread and redirects to a
+status page that auto-refreshes every 2s until it's done, then shows
+pass/fail and the full output.
+
+**No authentication of its own** - anyone who can reach the container's
+`8899` reaches the form, and it accepts and briefly holds the flow2
+password it's given to run pytest with. Don't publish this port openly;
+run it on a trusted network/loopback, same as you would a local dev
+tool, not something you'd put behind a public URL as-is.
+
 ## What's covered right now
 
 - `test_login.py` - login page loads, valid credentials succeed, wrong
