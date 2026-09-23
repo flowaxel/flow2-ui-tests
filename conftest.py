@@ -192,29 +192,58 @@ def open_clip_details(page, clip_thumbnail_src_fragment):
 
 
 def enter_metadata_edit_mode(page):
-    """Click the pencil icon that turns the clip detail page's read-only
-    metadata fields into editable inputs (Flow2/pages/Clip/ClipDetails.js)."""
-    page.locator("svg.fa-pen").first.click(force=True)
+    """
+    Click the pencil icon that turns the clip detail page's read-only
+    metadata fields into editable inputs (ClipDetailsToolbar's edit
+    toggle). `svg.fa-pen` alone isn't unique - some installs also
+    render a second, unrelated fa-pen icon elsewhere on the page (seen
+    on one real install: a zero-size, not-actually-visible edit icon
+    inside an InfoSection media-file table) - `:visible` is what
+    actually disambiguates them, found by comparing bounding boxes of
+    every fa-pen on the page after a `.first` click silently activated
+    the wrong control.
+    """
+    page.locator("svg.fa-pen:visible").first.click(force=True)
     page.wait_for_timeout(1000)
 
 
 def save_metadata_edit(page):
     """Click the save (floppy disk) icon that appears once in edit mode."""
-    page.locator("svg.fa-save").first.click(force=True)
+    page.locator("svg.fa-save:visible").first.click(force=True)
     page.wait_for_timeout(1500)
 
 
-def metadata_field_input(page, label_variants):
+def editable_metadata_fields(page):
     """
-    Locate an editable metadata input by the label text immediately
-    preceding it in the DOM (e.g. ["Titel", "Title"] to cover both
-    German and English locales - callers pass every label spelling
-    they want to accept). This is the field's on-screen label, part of
-    flow2's own fixed UI chrome, not a custom metadata field name -
-    safe across installs with different custom_metadata_def configs
-    (see README's design constraint). Browser XPath 1.0 has no regex
-    function, hence the explicit contains()-per-variant OR instead of
-    a single regex.
+    Every text/textarea input on the clip detail page once in edit
+    mode, that's part of the metadata panel rather than the app's own
+    search bars - deliberately not selected by a label like "Title"/
+    "Titel", because that field doesn't even exist on every install: a
+    real second install used for this suite has no title-like field at
+    all (its metadata panel is "Event"/"Tape Number"/"Creator"/etc.
+    instead) - the whole point of this suite's schema-agnostic design
+    (see README), caught only by actually testing against a second,
+    differently-configured install.
+
+    Filtered by an empty `placeholder` attribute rather than DOM
+    position/ancestry: every metadata field observed across two real,
+    differently-skinned installs has placeholder="", while flow2's own
+    top search bar and sidebar project/room search boxes (the only
+    other plain text inputs normally on this page) always have a
+    non-empty one ("Suchbegriff eingeben" etc.) - simpler and more
+    robust than trying to identify "the metadata panel" as a specific
+    DOM ancestor, which shifted shape between two installs tested here.
+
+    Returns every candidate, plural, rather than just the first: some
+    fields in this panel look like ordinary enabled inputs (no
+    `readonly`/`disabled` attribute) but are wired to reject or ignore
+    typed changes anyway (permission-gated, presumably) - found by a
+    `.fill()` on the literal first one silently not sticking. Callers
+    should try each in turn and use the first one that actually
+    retains a typed value, not just the first one that exists.
     """
-    condition = " or ".join(f'contains(text(),"{v}")' for v in label_variants)
-    return page.locator(f"xpath=//*[{condition}]/following::input[1]")
+    return page.locator(
+        'input[type="text"]:visible[placeholder=""], '
+        'input[type="text"]:visible:not([placeholder]), '
+        "textarea:visible"
+    )
