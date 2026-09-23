@@ -14,8 +14,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium
 
-COPY conftest.py entrypoint.sh webui.py ./
-COPY test_login.py test_dashboard.py test_search.py test_upload.py test_clipdetails.py ./
+COPY conftest.py entrypoint.sh webui.py perf.py ./
+COPY test_login.py test_dashboard.py test_search.py test_upload.py test_clipdetails.py test_navigation.py ./
 COPY fixtures/ ./fixtures/
 
 RUN chmod +x entrypoint.sh

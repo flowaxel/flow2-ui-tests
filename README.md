@@ -146,9 +146,49 @@ tool, not something you'd put behind a public URL as-is.
   confirm the change actually persisted server-side rather than just
   changing in the DOM) and restores the original value afterward.
 
+- `test_navigation.py` - Settings/Einstellungen, Administration,
+  Projects, Rooms and logout all load (or, for logout, actually return
+  to the login screen) without a leaked backend error or console
+  error. Deliberately shallow, one step up from test_dashboard.py -
+  broad coverage of flow2's other main pages every install has, not a
+  deep check of any one of them.
+
+## Performance timings
+
+Every run measures and reports how long the operations that matter
+most for comparing backend/middleware performance across installs
+actually took: login/WS connect, dashboard load, a search, opening a
+clip, a metadata save round trip, and (usually the real bottleneck)
+upload -> ingest -> visible. A table prints at the end of every run
+(min/avg/max per operation), and the full, raw measurements are
+written to `/tests/perf-report.json` inside the container (mount a
+volume there, or override the path with `FLOW2_PERF_REPORT`, to keep
+results outside the container for comparing across installs/runs).
+See `perf.py`.
+
 ## What's not covered yet
 
-Projects/rooms, distribution/download links, admin pages,
+Projects/rooms detail pages (only that they load), distribution/
+download links, admin sub-pages beyond "does Administration load",
 permission/granting edge cases, NVENC-specific transcode verification.
 Extend by adding a new `test_*.py` module following the same
 schema-agnostic rule above.
+
+## A note on reliability against a long-lived test instance
+
+`test_upload.py` and `test_clipdetails.py` were, at points while
+building this suite, observed to fail intermittently against a single
+flow2 instance that had already been through many hours of manual
+testing, redeploys, and repeated logins the same day - a WebSocket
+call failing with a generic "[object Object]"/"login failed" error
+from felib.js, even though the underlying operation (checked directly
+against the database) had actually succeeded. `wait_until()` now
+tolerates and retries through exactly this, and upload tests get their
+own throwaway login session rather than the shared one other tests
+reuse (see conftest.py's docstrings for both), but this class of
+flakiness wasn't fully root-caused - it may be specific to a backend/
+session that's been kept alive and repeatedly re-authenticated against
+for a long time, rather than something every run against a normal,
+freshly-deployed install will hit. If a run against a fresh install is
+flaky in this exact way, that's worth a real bug report, not just a
+retry.

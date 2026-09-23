@@ -34,18 +34,36 @@ def _clip_metadata(page, clip_id):
 
 
 def _find_any_clip(page):
-    """First clip id+thumbnail-src-fragment the app's own API can find, or None."""
+    """
+    The first clip from the app's own API that's ALSO currently
+    rendered as a thumbnail on this page, or None - not just the
+    API's own first result. On an install with more clips than the
+    dashboard's "recent" sections show, `getClipsByFulltext`'s first
+    result can easily be one that isn't actually visible anywhere on
+    the page open_clip_details() is about to look for it on (a
+    real-world timing gap between "first API result" and "first
+    thing on screen" - found by a test failing with "no rendered
+    thumbnail found" against a library that had grown past a
+    handful of clips over the course of a test day).
+    """
     return page.evaluate(
         """async () => {
             const res = await window.flow.getClipsByFulltext('', {});
             const clips = res.objects ? res.objects.asArray() : res;
-            if (!clips.length) return null;
-            const c = clips[0];
-            const id = c.getId ? c.getId() : c.data.id;
-            const thumb = c.mainthumbnail && c.mainthumbnail.url;
-            if (!thumb) return null;
-            const match = thumb.match(/file=[^&]*\\/([^&\\/]+)/);
-            return { id, fragment: match ? match[1] : String(id) };
+            const renderedSrcs = Array.from(document.querySelectorAll('img'))
+                .filter(i => i.src.includes('thumbnail.cgi'))
+                .map(i => i.src);
+            for (const c of clips) {
+                const id = c.getId ? c.getId() : c.data.id;
+                const thumb = c.mainthumbnail && c.mainthumbnail.url;
+                if (!thumb) continue;
+                const match = thumb.match(/file=[^&]*\\/([^&\\/]+)/);
+                const fragment = match ? match[1] : String(id);
+                if (renderedSrcs.some(src => src.includes(fragment))) {
+                    return { id, fragment };
+                }
+            }
+            return null;
         }"""
     )
 

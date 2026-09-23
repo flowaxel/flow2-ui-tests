@@ -29,33 +29,56 @@ from conftest import (
 pytestmark = pytest.mark.skipif(not TEST_UPLOAD, reason="FLOW2_TEST_UPLOAD=0")
 
 
-def _open_upload_file_dialog(page):
-    upload_trigger = _find_first(page, [
+def _upload_fixture(page, fixture_path):
+    """
+    Drives flow2's actual upload flow, confirmed against a real
+    install rather than guessed: clicking "Upload" opens an in-page
+    modal (drag & drop zone + a metadata form), NOT a native OS file
+    picker - there's no `filechooser` event to wait for at all.
+    The modal's file input is already a real, visible <input
+    type=file> (just one of several on the page, most hidden), so
+    `set_input_files()` works directly on it once found; a separate,
+    visually distinct red "Upload" submit button (not the sidebar nav
+    button of the same name) actually starts the upload.
+    """
+    upload_nav_button = _find_first(page, [
         'button:has-text("Upload")',
         'a:has-text("Upload")',
-        '[class*="upload" i] >> text=Upload',
-        'button[title*="upload" i]',
     ], timeout=15000)
-    with page.expect_file_chooser(timeout=15000) as fc_info:
-        upload_trigger.click()
-    return fc_info.value
+    upload_nav_button.click()
+    page.wait_for_timeout(1500)
 
+    file_input = None
+    for candidate in page.locator('input[type="file"]').all():
+        if candidate.is_visible():
+            file_input = candidate
+            break
+    assert file_input is not None, "upload modal opened but no visible file input was found in it"
+    file_input.set_input_files(fixture_path)
+    page.wait_for_timeout(2000)
 
-def _upload_fixture(page, fixture_path):
-    file_chooser = _open_upload_file_dialog(page)
-    file_chooser.set_files(fixture_path)
-    # some flow2 upload UIs need an explicit confirm/start action after
-    # picking the file(s), others start automatically on selection -
-    # try the common confirm labels, but don't fail if none appear.
-    try:
-        confirm = _find_first(page, [
-            'button:has-text("Start")',
-            'button:has-text("Hochladen")',
-            'button:has-text("Upload starten")',
-        ], timeout=5000)
-        confirm.click()
-    except Exception:
-        pass
+    # the modal's own submit button also just says "Upload" - the LAST
+    # one in DOM order is reliably the modal's, not the sidebar nav's
+    # (which opened the modal in the first place and is still present
+    # behind it).
+    submit_buttons = page.locator('button:has-text("Upload")').all()
+    assert submit_buttons, "no Upload submit button found in the upload modal"
+    submit_buttons[-1].click(force=True)
+    page.wait_for_timeout(3000)
+
+    # a rejected upload (permission, quota, a transient backend error)
+    # surfaces as a SweetAlert2 popup, which then blocks every
+    # subsequent click on the page (including other tests', since the
+    # session/page is shared - see conftest.py's logged_in_page) until
+    # dismissed. Surface its actual message in the failure rather than
+    # letting the next test fail with a confusing "element intercepts
+    # pointer events" instead.
+    error_popup = page.locator(".swal2-container")
+    if error_popup.count() > 0 and error_popup.is_visible():
+        popup_text = error_popup.inner_text()
+        page.locator(".swal2-confirm, .swal2-close").first.click(force=True)
+        page.wait_for_timeout(500)
+        raise AssertionError(f"upload was rejected by the backend: {popup_text!r}")
 
 
 def _find_clip_by_fulltext(page, query):
@@ -107,33 +130,33 @@ def _assert_image_url_loads(page, url):
     )
 
 
-def test_picture_upload_ingest_and_view(logged_in_page, picture_fixture_path):
+def test_picture_upload_ingest_and_view(fresh_logged_in_page, picture_fixture_path):
     basename = os.path.splitext(os.path.basename(picture_fixture_path))[0]
-    _upload_fixture(logged_in_page, picture_fixture_path)
+    _upload_fixture(fresh_logged_in_page, picture_fixture_path)
 
     clip_ids = wait_until(
-        lambda: _find_clip_by_fulltext(logged_in_page, basename),
+        lambda: _find_clip_by_fulltext(fresh_logged_in_page, basename),
         timeout=UPLOAD_TIMEOUT,
         description=f'uploaded picture "{basename}" to appear in search',
     )
     assert clip_ids, f"upload of {basename} never showed up in search within {UPLOAD_TIMEOUT}s"
 
-    urls = _get_clip_view_urls(logged_in_page, clip_ids[0])
+    urls = _get_clip_view_urls(fresh_logged_in_page, clip_ids[0])
     assert urls["thumbnail"], f"uploaded clip {clip_ids[0]} has no thumbnail at all"
-    _assert_image_url_loads(logged_in_page, urls["thumbnail"])
+    _assert_image_url_loads(fresh_logged_in_page, urls["thumbnail"])
     assert urls["mediafiles"], f"uploaded clip {clip_ids[0]} has no mediafiles at all"
     for mf_url in urls["mediafiles"]:
-        _assert_image_url_loads(logged_in_page, mf_url)
+        _assert_image_url_loads(fresh_logged_in_page, mf_url)
 
-    assert_no_leaked_error(logged_in_page.content())
+    assert_no_leaked_error(fresh_logged_in_page.content())
 
 
-def test_video_upload_ingest_and_preview(logged_in_page, video_fixture_path):
+def test_video_upload_ingest_and_preview(fresh_logged_in_page, video_fixture_path):
     basename = os.path.splitext(os.path.basename(video_fixture_path))[0]
-    _upload_fixture(logged_in_page, video_fixture_path)
+    _upload_fixture(fresh_logged_in_page, video_fixture_path)
 
     clip_ids = wait_until(
-        lambda: _find_clip_by_fulltext(logged_in_page, basename),
+        lambda: _find_clip_by_fulltext(fresh_logged_in_page, basename),
         timeout=UPLOAD_TIMEOUT,
         description=f'uploaded video "{basename}" to appear in search',
     )
@@ -147,12 +170,12 @@ def test_video_upload_ingest_and_preview(logged_in_page, video_fixture_path):
     # which some installs may not have NVENC/a transcode pipeline for
     # at all - see README's "what's not covered yet").
     def has_thumbnail():
-        urls = _get_clip_view_urls(logged_in_page, clip_ids[0])
+        urls = _get_clip_view_urls(fresh_logged_in_page, clip_ids[0])
         return urls if urls["thumbnail"] else None
 
     urls = wait_until(
         has_thumbnail, timeout=UPLOAD_TIMEOUT,
         description=f"clip {clip_ids[0]} to get a thumbnail (preview transcode)",
     )
-    _assert_image_url_loads(logged_in_page, urls["thumbnail"])
-    assert_no_leaked_error(logged_in_page.content())
+    _assert_image_url_loads(fresh_logged_in_page, urls["thumbnail"])
+    assert_no_leaked_error(fresh_logged_in_page.content())

@@ -26,6 +26,7 @@ never mapped "media" as a searchable field, so the backend couldn't
 resolve the filter and dropped it - see this repo's commit 22d6f9c.
 """
 from conftest import assert_no_leaked_error
+from perf import timed
 
 
 def _search_via_flow(page, media_filter=None):
@@ -37,17 +38,18 @@ def _search_via_flow(page, media_filter=None):
     fields = []
     if media_filter:
         fields.append({"field": "media", "type": "CONTAINS", "value": media_filter})
-    result = page.evaluate(
-        """async (fields) => {
-            const res = await window.flow.getClipsByFulltext('', { fields });
-            const clips = res.objects ? res.objects.asArray() : res;
-            return clips.map(c => ({
-                id: c.getId ? c.getId() : c.data.id,
-                media: c.getMedia ? (c.getMedia().asArray ? c.getMedia().asArray() : c.getMedia()) : (c.data.media || ''),
-            }));
-        }""",
-        fields,
-    )
+    with timed("search_getClipsByFulltext", filter=media_filter or "none"):
+        result = page.evaluate(
+            """async (fields) => {
+                const res = await window.flow.getClipsByFulltext('', { fields });
+                const clips = res.objects ? res.objects.asArray() : res;
+                return clips.map(c => ({
+                    id: c.getId ? c.getId() : c.data.id,
+                    media: c.getMedia ? (c.getMedia().asArray ? c.getMedia().asArray() : c.getMedia()) : (c.data.media || ''),
+                }));
+            }""",
+            fields,
+        )
     return result
 
 

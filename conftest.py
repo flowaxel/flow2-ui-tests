@@ -10,9 +10,13 @@ section for why.
 import os
 import re
 import time
+from urllib.parse import urlparse
 
 import pytest
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+import perf
+from perf import timed
 
 FLOW2_URL = os.environ["FLOW2_URL"].rstrip("/") + "/"
 FLOW2_USER = os.environ["FLOW2_USER"]
@@ -66,6 +70,32 @@ def page(browser):
     context.close()
 
 
+@pytest.fixture
+def fresh_logged_in_page(page):
+    """
+    A freshly logged-in page in its OWN browser context, not the
+    shared session `logged_in_page` gives every other test.
+
+    Upload specifically has been observed to leave the *shared*
+    session's WebSocket unable to make further API calls afterward
+    (every subsequent window.flow call failing with a backend "Error:
+    [object Object]"/login-shaped error) - flow2's own upload handling
+    does its own separate internal login (config.json's
+    middleware.granting.fclogin, a fixed non-human account, not the
+    test user) alongside the interactive session's, and something
+    about that interaction breaks the shared session's own state in a
+    way this suite couldn't isolate further without flow2's own
+    source. Giving upload tests a throwaway session avoids destabilizing
+    every other test that runs after them, at the cost of one extra
+    login (see conftest.py's `_shared_session` for why that's
+    normally avoided) - worth it here specifically.
+    """
+    with timed("page_load_to_interactive"):
+        page.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
+    _do_login(page)
+    return page
+
+
 def _find_first(page, selectors, timeout=10000):
     """Try each selector in order, return the first that matches at least one element."""
     last_err = None
@@ -79,16 +109,14 @@ def _find_first(page, selectors, timeout=10000):
     raise last_err
 
 
-@pytest.fixture
-def logged_in_page(page):
+def _do_login(page):
     """
-    A page with a valid flow2 session, landed on the dashboard.
-
-    flow2's login form only enables its password field once the
-    frontend's WebSocket connection to the backend is up (see this
-    repo's own felib.js getSocket()/WebSocket.OPEN history for a real
-    bug that broke exactly this) - waiting for that is itself already
-    an implicit check that the WS transport works, not just HTTP.
+    Drives the login form on an already-navigated-to page. flow2's
+    login form only enables its password field once the frontend's
+    WebSocket connection to the backend is up (see this repo's own
+    felib.js getSocket()/WebSocket.OPEN history for a real bug that
+    broke exactly this) - waiting for that is itself already an
+    implicit check that the WS transport works, not just HTTP.
 
     Selectors deliberately try flow2's default English placeholder
     text first (stable across installs that don't localize the login
@@ -96,17 +124,16 @@ def logged_in_page(page):
     text-like input in the form, since some installs may run flow2 in
     a different locale.
     """
-    page.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
-
     password_field = _find_first(page, [
         'input[placeholder="Password" i]',
         'input[type="password"]',
     ])
-    page.wait_for_function(
-        "el => !el.disabled",
-        arg=password_field.element_handle(),
-        timeout=20000,
-    )
+    with timed("websocket_connect"):
+        page.wait_for_function(
+            "el => !el.disabled",
+            arg=password_field.element_handle(),
+            timeout=20000,
+        )
 
     username_field = _find_first(page, [
         'input[placeholder="Username" i]',
@@ -124,15 +151,103 @@ def logged_in_page(page):
         'button:has-text("Anmelden")',
         'button[type="submit"]',
     ])
-    login_button.click(force=True)
+    with timed("login_submit_to_authenticated"):
+        login_button.click(force=True)
 
-    # no single stable "you are logged in" DOM marker is guaranteed
-    # across custom UI configs, so wait for the password field to
-    # disappear (the login form unmounts on success) instead of
-    # asserting on any specific post-login content.
-    password_field.wait_for(state="detached", timeout=20000)
-    page.wait_for_timeout(1000)
-    return page
+        # no single stable "you are logged in" DOM marker is guaranteed
+        # across custom UI configs, so wait for the password field to
+        # disappear (the login form unmounts on success) instead of
+        # asserting on any specific post-login content.
+        password_field.wait_for(state="detached", timeout=20000)
+        page.wait_for_timeout(1000)
+
+
+@pytest.fixture(scope="session")
+def _shared_session(browser):
+    """
+    One flow2 login, shared by every test that needs to already be
+    logged in, instead of a fresh login per test function.
+
+    This isn't just a speed optimization (logging in ~15+ times added
+    up to a real chunk of a run, visible in the perf report's own
+    login_submit_to_authenticated numbers) - it fixes a genuine test
+    bug found by running the full suite together: many FlowCenter
+    installs only allow a user to be logged in once at a time, so a
+    second `logged_in_page` fixture logging the SAME test user in
+    again mid-run silently invalidated the first session's WebSocket,
+    surfacing as an unrelated "Error: login failed" deep inside
+    felib.js on whichever test happened to run next. One shared
+    session for the whole suite avoids the collision entirely (see
+    also README's suggestion to use a dedicated, non-human test user
+    for exactly this kind of reason).
+
+    Tests that specifically exercise the login *form* itself
+    (test_login.py) intentionally do NOT use this fixture - they need
+    a fresh, unauthenticated page each time, which the plain `page`
+    fixture already provides.
+    """
+    context = browser.new_context(ignore_https_errors=INSECURE_TLS)
+    console_errors = []
+    pg = context.new_page()
+    pg.on("console", lambda msg: console_errors.append(msg.text()) if msg.type == "error" else None)
+    pg.console_errors = console_errors
+
+    with timed("page_load_to_interactive"):
+        pg.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
+    _do_login(pg)
+
+    yield pg
+    context.close()
+
+
+@pytest.fixture
+def logged_in_page(_shared_session):
+    """
+    The shared, already-authenticated session (see `_shared_session`),
+    reset to a known-good starting point for each test: a fresh
+    console-error list (so one test's warnings don't fail the next
+    one's assertion) and back at the app's root route (in case a
+    previous test navigated elsewhere), without a second login.
+    """
+    _shared_session.console_errors.clear()
+    # NOT page.goto() - a hard navigation reloads the whole page, which
+    # tears down the in-memory WebSocket/login state a real page.goto()
+    # doesn't automatically restore, surfacing as a confusing backend
+    # "Unable to get logindata for user"/"login failed" error on the
+    # NEXT test rather than a clean re-login (found by that exact
+    # failure appearing only after adding this reset). Client-side
+    # History API navigation + a manual popstate event, the same
+    # mechanism React Router's own <Link> clicks use, gets back to the
+    # app's root route without disturbing the live session at all.
+    home_path = urlparse(FLOW2_URL).path or "/"
+    _shared_session.evaluate(
+        """(path) => {
+            window.history.pushState({}, '', path);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+        }""",
+        home_path,
+    )
+    _shared_session.wait_for_timeout(1000)
+
+    # The shared WS session has been observed to drop on its own after
+    # a long-running test (a 15-field metadata edit/save loop, in
+    # particular) even without any reload - some install-side idle/
+    # session timeout, not something this suite controls. Detected by
+    # a lightweight window.flow call rather than assumed still-good;
+    # re-login transparently rather than let it surface as a confusing
+    # "Unable to get logindata for user" deep inside felib.js on
+    # whatever test happens to run next.
+    session_alive = _shared_session.evaluate(
+        """async () => {
+            try { await window.flow.getClipsByFulltext('', { limit: 1 }); return true; }
+            catch (e) { return false; }
+        }"""
+    )
+    if not session_alive:
+        _shared_session.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
+        _do_login(_shared_session)
+
+    return _shared_session
 
 
 @pytest.fixture
@@ -146,15 +261,41 @@ def video_fixture_path():
 
 
 def wait_until(fn, timeout, interval=3, description="condition"):
-    """Poll fn() until it returns a truthy value or timeout (seconds) elapses."""
-    deadline = time.monotonic() + timeout
+    """
+    Poll fn() until it returns a truthy value or timeout (seconds)
+    elapses. Always records how long it actually took under perf - the
+    slow ones here (upload -> ingest -> visible, above all) are
+    exactly the backend/middleware performance numbers worth comparing
+    across installs, per Axel's own reason for adding this module.
+
+    Tolerates fn() raising, rather than letting one bad poll kill the
+    whole wait: a WebSocket call made *while* the backend is mid-way
+    through processing what we're polling for (a fresh upload, a
+    reconnect after one) can throw a transient error that has nothing
+    to do with whether the condition is actually met - observed for
+    real as an intermittent "[object Object]" from felib.js on a
+    getClipsByFulltext call placed seconds after a successful upload
+    that had, per the database, already succeeded. Only the last
+    `timeout` seconds worth of exceptions are swallowed; one still
+    surfaces (via the final AssertionError's cause) if the condition
+    never gets met at all.
+    """
+    start = time.monotonic()
+    deadline = start + timeout
     last_result = None
+    last_exc = None
     while time.monotonic() < deadline:
-        last_result = fn()
+        try:
+            last_result = fn()
+        except Exception as e:
+            last_exc = e
+            last_result = None
         if last_result:
+            perf.record(f"wait_until: {description}", time.monotonic() - start, timed_out=False)
             return last_result
         time.sleep(interval)
-    raise AssertionError(f"timed out after {timeout}s waiting for: {description}")
+    perf.record(f"wait_until: {description}", time.monotonic() - start, timed_out=True)
+    raise AssertionError(f"timed out after {timeout}s waiting for: {description}") from last_exc
 
 
 def open_clip_details(page, clip_thumbnail_src_fragment):
@@ -186,9 +327,10 @@ def open_clip_details(page, clip_thumbnail_src_fragment):
         clip_thumbnail_src_fragment,
     )
     assert box, f'no rendered thumbnail found containing "{clip_thumbnail_src_fragment}"'
-    page.mouse.dblclick(box["x"], box["y"])
-    page.wait_for_url("**/clipdetails/**", timeout=15000)
-    page.wait_for_timeout(1500)
+    with timed("clip_details_open", clip=clip_thumbnail_src_fragment):
+        page.mouse.dblclick(box["x"], box["y"])
+        page.wait_for_url("**/clipdetails/**", timeout=15000)
+        page.wait_for_timeout(1500)
 
 
 def enter_metadata_edit_mode(page):
@@ -209,8 +351,9 @@ def enter_metadata_edit_mode(page):
 
 def save_metadata_edit(page):
     """Click the save (floppy disk) icon that appears once in edit mode."""
-    page.locator("svg.fa-save:visible").first.click(force=True)
-    page.wait_for_timeout(1500)
+    with timed("metadata_save_roundtrip"):
+        page.locator("svg.fa-save:visible").first.click(force=True)
+        page.wait_for_timeout(1500)
 
 
 def editable_metadata_fields(page):
@@ -247,3 +390,35 @@ def editable_metadata_fields(page):
         'input[type="text"]:visible:not([placeholder]), '
         "textarea:visible"
     )
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """
+    Prints every perf.timed() measurement taken during the run as a
+    table, and writes the full set to a JSON file (see perf.py) - the
+    whole point being a number Axel can diff between installs/runs,
+    not just eyeball once in scrollback and forget.
+    """
+    records = perf.all_records()
+    if not records:
+        return
+    terminalreporter.section("Performance timings")
+    for r in records:
+        extra = ", ".join(f"{k}={v}" for k, v in r.items() if k not in ("op", "seconds"))
+        line = f"{r['op']:<32} {r['seconds']:>8.3f}s"
+        if extra:
+            line += f"  ({extra})"
+        terminalreporter.write_line(line)
+
+    by_op = {}
+    for r in records:
+        by_op.setdefault(r["op"], []).append(r["seconds"])
+    terminalreporter.write_line("")
+    terminalreporter.write_line("Per-operation min / avg / max (seconds), across every call this run:")
+    for op, values in sorted(by_op.items()):
+        terminalreporter.write_line(
+            f"  {op:<32} min={min(values):>7.3f}  avg={sum(values) / len(values):>7.3f}  max={max(values):>7.3f}  (n={len(values)})"
+        )
+
+    report_path = perf.write_report(FLOW2_URL)
+    terminalreporter.write_line(f"\nFull JSON report: {report_path}")
