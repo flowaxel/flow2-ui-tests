@@ -82,6 +82,9 @@ Optional environment variables:
 | `FLOW2_INSECURE_TLS`         | `1`     | Set to `0` to require a valid TLS chain (default tolerates self-signed certs, common in test/dev). |
 | `FLOW2_TEST_UPLOAD`          | `1`     | Set to `0` to skip the upload/ingest/view round-trip tests (`test_upload.py`) entirely.          |
 | `FLOW2_UPLOAD_TIMEOUT`       | `180`   | Seconds to wait for an uploaded file to finish automatic ingest/preview processing before failing. Installs with a slower/queued transcode pipeline may need this raised. |
+| `FLOW2_TEST_PERMISSIONS`     | `1`     | Set to `0` to skip the admin-vs-restricted-user rights matrix (`test_permissions.py`) entirely.  |
+| `FLOW2_LOWPRIV_USER` / `FLOW2_LOWPRIV_PASSWORD` | `flow2uitest_lowpriv` / `TestLowpriv2026!` | Credentials for the restricted account `test_permissions.py` creates (if missing) and logs into. Point at an existing low-privilege account instead if you'd rather not let the suite create one. |
+| `FLOW2_LOWPRIV_LEVEL_LABEL`  | `Level 1` | The exact option text to pick in the admin "Neuer Benutzer" form's Userlevel dropdown when creating the restricted account. |
 
 Pass extra `pytest` arguments after the image name, e.g.
 `docker run --rm -e ... flow2-ui-tests -k test_login -v`.
@@ -152,6 +155,17 @@ tool, not something you'd put behind a public URL as-is.
   error. Deliberately shallow, one step up from test_dashboard.py -
   broad coverage of flow2's other main pages every install has, not a
   deep check of any one of them.
+- `test_permissions.py` - an admin-vs-restricted-user rights matrix:
+  creates a second, low-privilege account on demand and compares actual
+  rendered UI between it and the admin account, rather than trusting
+  the granting config in isolation - a restricted account seeing the
+  Administration link, or seeing the same number of delete controls on
+  a clip detail page as admin, means granting isn't actually
+  restricting anything regardless of what the config says it should.
+  Found a real gap this way on the reference install: a Level 1 account
+  gets full, unrestricted access to every Administration tab (Benutzer,
+  System-Einstellungen, ...) - only `deleteclip` is actually enforced,
+  both in the granting config and in what's rendered.
 
 ## Performance timings
 

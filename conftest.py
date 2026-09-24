@@ -25,6 +25,16 @@ INSECURE_TLS = os.environ.get("FLOW2_INSECURE_TLS", "1") != "0"
 UPLOAD_TIMEOUT = int(os.environ.get("FLOW2_UPLOAD_TIMEOUT", "180"))
 TEST_UPLOAD = os.environ.get("FLOW2_TEST_UPLOAD", "1") != "0"
 
+# A restricted second account for test_permissions.py's admin-vs-restricted
+# comparisons. Created on demand (see `ensure_lowpriv_user`) rather than
+# requiring the operator to pre-provision one - the fixed username makes
+# that idempotent across runs. Override via env if a real install already
+# has a suitable low-privilege account to reuse instead.
+LOWPRIV_USER = os.environ.get("FLOW2_LOWPRIV_USER", "flow2uitest_lowpriv")
+LOWPRIV_PASSWORD = os.environ.get("FLOW2_LOWPRIV_PASSWORD", "TestLowpriv2026!")
+LOWPRIV_LEVEL_LABEL = os.environ.get("FLOW2_LOWPRIV_LEVEL_LABEL", "Level 1")
+TEST_PERMISSIONS = os.environ.get("FLOW2_TEST_PERMISSIONS", "1") != "0"
+
 # strings that show up when a CGI/SOAP call crashes, a C++ exception
 # escapes, or a SQL error leaks into a JSON/HTML response - if any of
 # these show up somewhere we weren't specifically provoking a failure,
@@ -248,6 +258,180 @@ def logged_in_page(_shared_session):
         _do_login(_shared_session)
 
     return _shared_session
+
+
+def _open_user_menu(page):
+    page.click(f"text={FLOW2_USER}", force=True, timeout=5000)
+    page.wait_for_timeout(400)
+
+
+def _navigate_to_admin_users(page):
+    """Drives Administration > Benutzer from the top-level nav, returns True on success."""
+    _open_user_menu(page)
+    admin_link = page.locator('a:has-text("Administration")').first
+    if admin_link.count() == 0:
+        return False
+    admin_link.click()
+    page.wait_for_timeout(1500)
+    try:
+        users_tab = _find_first(page, ['text=Benutzer', 'text=Users'], timeout=3000)
+    except PlaywrightTimeoutError:
+        return False
+    users_tab.click(force=True)
+    page.wait_for_timeout(1500)
+    return True
+
+
+def _create_user_if_missing(page, username, password, level_label, first_name, last_name):
+    """
+    Creates `username` via Administration > Benutzer > Neuer Benutzer if it
+    doesn't already exist in the user list. Idempotent (safe to call every
+    run) and returns True if the account exists afterward (whether it was
+    just created or already there), False if it could not be created.
+
+    Scopes the new-user form's inputs to the panel actually containing the
+    "Speichern" button, rather than the whole page: the page also has
+    several unrelated search-box inputs (top search bar, project/room
+    sidebar filters) that a plain `page.locator('input')` would also match,
+    found the same way editable_metadata_fields() had to filter down to the
+    clip metadata panel specifically.
+    """
+    if not _navigate_to_admin_users(page):
+        return False
+    if username in page.content():
+        return True
+
+    try:
+        new_user_btn = _find_first(page, ['text=Neuer Benutzer', 'text=New User'], timeout=3000)
+    except PlaywrightTimeoutError:
+        return False
+    new_user_btn.click(force=True)
+    page.wait_for_timeout(1000)
+
+    found = page.evaluate(
+        """() => {
+            const saveBtn = Array.from(document.querySelectorAll('*')).find(
+                el => el.children.length === 0 && el.innerText &&
+                (el.innerText.trim() === 'Speichern' || el.innerText.trim() === 'Save')
+            );
+            let panel = saveBtn;
+            for (let hop = 0; hop < 8 && panel; hop++) {
+                if (panel.querySelectorAll('input, select').length >= 5) break;
+                panel = panel.parentElement;
+            }
+            if (!panel) return false;
+            panel.setAttribute('data-newuser-panel', '1');
+            return true;
+        }"""
+    )
+    if not found:
+        return False
+
+    panel = page.locator('[data-newuser-panel="1"]')
+    fields = panel.locator('input, select')
+    # order matches the real form: Benutzername, E-Mail, Userlevel,
+    # Passwort, Vorname, Nachname (no stable name/id attributes to select
+    # by - confirmed by inspecting the live form, not guessed)
+    fields.nth(0).fill(username)
+    fields.nth(1).fill(f"{username}@example.invalid")
+    fields.nth(2).select_option(label=level_label)
+    fields.nth(3).fill(password)
+    fields.nth(4).fill(first_name)
+    fields.nth(5).fill(last_name)
+
+    _find_first(page, ['text=Speichern', 'text=Save'], timeout=3000).click(force=True)
+    page.wait_for_timeout(2000)
+
+    return _navigate_to_admin_users(page) and username in page.content()
+
+
+@pytest.fixture(scope="session")
+def ensure_lowpriv_user(_shared_session):
+    """
+    Creates the LOWPRIV_USER account once per test run (via the admin
+    session), if it doesn't already exist. Skips every dependent test
+    (rather than failing) if it can't be created - either this install's
+    admin has no Administration access at all, or is missing the
+    `fc_edituser` server-wide grant (found for real on the install this was
+    built against: even the level6 admin account lacked it by default,
+    with no install-time step that sets it - see this repo's own commit
+    history/PR description for the exact backend SOAP call that fixes it,
+    since there's no button for it in the UI itself).
+    """
+    if not TEST_PERMISSIONS:
+        pytest.skip("FLOW2_TEST_PERMISSIONS=0")
+    # This fixture is session-scoped so it can't depend on `logged_in_page`
+    # (function-scoped) for its usual reset-to-home - do the same
+    # client-side navigation directly, since whatever test happened to run
+    # right before this fixture first executes may have left the shared
+    # session on some other route (e.g. still on /admin), where the
+    # top-nav user menu isn't necessarily rendered the same way.
+    home_path = urlparse(FLOW2_URL).path or "/"
+    _shared_session.evaluate(
+        """(path) => {
+            window.history.pushState({}, '', path);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+        }""",
+        home_path,
+    )
+    _shared_session.wait_for_timeout(1000)
+    ok = _create_user_if_missing(
+        _shared_session, LOWPRIV_USER, LOWPRIV_PASSWORD, LOWPRIV_LEVEL_LABEL,
+        "Flow2UiTest", "Lowpriv",
+    )
+    if not ok:
+        pytest.skip(
+            f"could not create/find the '{LOWPRIV_USER}' test account - the admin "
+            "user either has no Administration access, or is missing the backend "
+            "fc_edituser grant (a server-wide flow2 permission, not role-specific; "
+            "no UI to set it, needs a real edituseroptions SOAP call)"
+        )
+    return LOWPRIV_USER
+
+
+@pytest.fixture(scope="session")
+def _lowpriv_session(browser, ensure_lowpriv_user):
+    """The restricted account's own session, separate from the admin one."""
+    context = browser.new_context(ignore_https_errors=INSECURE_TLS)
+    console_errors = []
+    pg = context.new_page()
+    pg.on("console", lambda msg: console_errors.append(msg.text()) if msg.type == "error" else None)
+    pg.console_errors = console_errors
+
+    pg.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
+    password_field = _find_first(pg, ['input[placeholder="Password" i]', 'input[type="password"]'])
+    pg.wait_for_function("el => !el.disabled", arg=password_field.element_handle(), timeout=20000)
+    username_field = _find_first(pg, ['input[placeholder="Username" i]', 'input[type="text"]:visible'])
+    username_field.click()
+    username_field.type(LOWPRIV_USER, delay=20)
+    password_field.click()
+    password_field.type(LOWPRIV_PASSWORD, delay=20)
+    login_button = _find_first(pg, [
+        'button:has-text("Log in")', 'button:has-text("Login")',
+        'button:has-text("Anmelden")', 'button[type="submit"]',
+    ])
+    login_button.click(force=True)
+    password_field.wait_for(state="detached", timeout=20000)
+    pg.wait_for_timeout(1000)
+
+    yield pg
+    context.close()
+
+
+@pytest.fixture
+def lowpriv_logged_in_page(_lowpriv_session):
+    """Same reset-to-home pattern as `logged_in_page`, for the restricted account."""
+    _lowpriv_session.console_errors.clear()
+    home_path = urlparse(FLOW2_URL).path or "/"
+    _lowpriv_session.evaluate(
+        """(path) => {
+            window.history.pushState({}, '', path);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+        }""",
+        home_path,
+    )
+    _lowpriv_session.wait_for_timeout(1000)
+    return _lowpriv_session
 
 
 @pytest.fixture
