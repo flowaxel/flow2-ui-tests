@@ -316,19 +316,22 @@ def open_clip_details(page, clip_thumbnail_src_fragment):
     by a substring of its thumbnail.cgi URL (e.g. a filename) - the
     caller decides which clip, this helper only drives the click.
     """
-    box = page.evaluate(
-        """(fragment) => {
-            const img = Array.from(document.querySelectorAll('img'))
-                .find(i => i.src.includes('thumbnail.cgi') && i.src.includes(fragment));
-            if (!img) return null;
-            const r = img.getBoundingClientRect();
-            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        }""",
-        clip_thumbnail_src_fragment,
-    )
-    assert box, f'no rendered thumbnail found containing "{clip_thumbnail_src_fragment}"'
+    # A Playwright *locator* click, not a manually-computed
+    # getBoundingClientRect()/page.mouse.dblclick() at fixed
+    # coordinates - the manual approach doesn't reliably work for a
+    # thumbnail sitting near the bottom edge of a "recent items" list
+    # once that list has grown past a screenful (a real state reached
+    # after enough test uploads over the course of a test day):
+    # scrollIntoView({block:'center'}) can't actually center an
+    # element that's near the end of the page's total scrollable
+    # content, leaving it right at the viewport's bottom edge where a
+    # dblclick can silently miss. Playwright's own locator actions
+    # scroll and verify actionability themselves before clicking,
+    # which is exactly the robustness this needs.
+    thumb = page.locator(f'img[src*="thumbnail.cgi"][src*="{clip_thumbnail_src_fragment}"]').first
+    thumb.wait_for(state="visible", timeout=10000)
     with timed("clip_details_open", clip=clip_thumbnail_src_fragment):
-        page.mouse.dblclick(box["x"], box["y"])
+        thumb.dblclick()
         page.wait_for_url("**/clipdetails/**", timeout=15000)
         page.wait_for_timeout(1500)
 
