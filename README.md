@@ -86,6 +86,7 @@ Optional environment variables:
 | `FLOW2_LOWPRIV_USER` / `FLOW2_LOWPRIV_PASSWORD` | `flow2uitest_lowpriv` / `TestLowpriv2026!` | Credentials for the restricted account `test_permissions.py` creates (if missing) and logs into. Point at an existing low-privilege account instead if you'd rather not let the suite create one. |
 | `FLOW2_LOWPRIV_LEVEL_LABEL`  | `Level 1` | The exact option text to pick in the admin "Neuer Benutzer" form's Userlevel dropdown when creating the restricted account. |
 | `FLOW2_TEST_PROJECT_NAME` / `FLOW2_TEST_ROOM_NAME` | `flow2uitest_project` / `flow2uitest_room` | Name given to the project/room `test_projects.py`/`test_rooms.py` create each run. |
+| `FLOW2_CLEANUP`              | (unset) | `1` deletes everything *this run* created (test projects/rooms/restricted user) when it finishes, `0` always leaves it in place. Left unset, you're asked interactively (`docker run -it`) - or, with no terminal attached (CI, `--webui`), it defaults to leaving everything in place. See "Cleaning up test data" below. |
 
 Pass extra `pytest` arguments after the image name, e.g.
 `docker run --rm -e ... flow2-ui-tests -k test_login -v`.
@@ -185,6 +186,33 @@ tool, not something you'd put behind a public URL as-is.
   reliable enough handle to find a specific one back safely - see
   `ensure_test_project`'s docstring in conftest.py), so repeated runs
   will accumulate test projects/rooms on the target install over time.
+
+## Cleaning up test data
+
+`test_projects.py`, `test_rooms.py` and `test_permissions.py` all
+create real content on the target install (a project, a room, a
+restricted test user) - see "What's covered right now" above for why
+none of that is reused/deleted automatically by default. At the end of
+a run that created any of it, this suite offers to clean up right
+away, tracking only what *this run* actually created (never anything
+that already existed under the same name, so a real project you happen
+to have named the same thing is never at risk):
+
+- Run with `docker run -it ...` (note the `-it`) and you're asked
+  `Clean up this run's test data now? [y/N]` once the run finishes.
+- Or skip the prompt with `-e FLOW2_CLEANUP=1` (always clean up) /
+  `-e FLOW2_CLEANUP=0` (never clean up) - the right choice for CI.
+- The web GUI has its own "Clean up test data this run creates"
+  checkbox instead (there's no terminal to prompt in a background
+  thread), which does the same thing.
+
+Deleting a project or the restricted user both use this install's own
+real UI delete flow, and are verified working. Room deletion is
+best-effort and, on the reference install, doesn't work at all: rooms
+have their own real backend bug (see `test_rooms.py`) that also seems
+to hide the room's own delete menu entry from admin - cleanup reports
+this plainly (`room <id>: no working delete option found...`) rather
+than pretending it succeeded, and that room needs deleting by hand.
 
 ## Performance timings
 

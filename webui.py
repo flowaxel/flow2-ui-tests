@@ -121,6 +121,11 @@ def index():
         <label for="insecure_tls">Allow self-signed / untrusted TLS certificate</label>
       </div>
 
+      <div class="checkbox-row">
+        <input type="checkbox" id="cleanup" name="cleanup">
+        <label for="cleanup">Clean up test data this run creates (projects/rooms/restricted test user) when the run finishes</label>
+      </div>
+
       <label for="upload_timeout">Upload ingest timeout (seconds)</label>
       <input type="number" id="upload_timeout" name="upload_timeout" value="180" min="10">
 
@@ -139,6 +144,7 @@ def run():
     flow2_user = request.form.get("user", "").strip()
     flow2_password = request.form.get("password", "")
     insecure_tls = "1" if request.form.get("insecure_tls") else "0"
+    cleanup = "1" if request.form.get("cleanup") else "0"
     upload_timeout = request.form.get("upload_timeout", "180").strip() or "180"
     selected_modules = request.form.getlist("modules") or [m for m, _ in TEST_MODULES]
 
@@ -156,6 +162,11 @@ def run():
         "FLOW2_INSECURE_TLS": insecure_tls,
         "FLOW2_TEST_UPLOAD": test_upload,
         "FLOW2_UPLOAD_TIMEOUT": upload_timeout,
+        # explicit either way (never left unset): this subprocess has no
+        # real terminal for conftest.py's interactive y/N prompt to use,
+        # so leaving FLOW2_CLEANUP unset would always silently default
+        # to "don't clean up" regardless of what this checkbox says.
+        "FLOW2_CLEANUP": cleanup,
     })
 
     job_id = uuid.uuid4().hex[:12]

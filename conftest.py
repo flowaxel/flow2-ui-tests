@@ -9,6 +9,7 @@ section for why.
 """
 import os
 import re
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -34,6 +35,17 @@ LOWPRIV_USER = os.environ.get("FLOW2_LOWPRIV_USER", "flow2uitest_lowpriv")
 LOWPRIV_PASSWORD = os.environ.get("FLOW2_LOWPRIV_PASSWORD", "TestLowpriv2026!")
 LOWPRIV_LEVEL_LABEL = os.environ.get("FLOW2_LOWPRIV_LEVEL_LABEL", "Level 1")
 TEST_PERMISSIONS = os.environ.get("FLOW2_TEST_PERMISSIONS", "1") != "0"
+
+# "1"/"0" skips the prompt below entirely (for CI/scripted runs); left
+# unset, pytest_sessionfinish asks interactively if a real terminal is
+# attached, and otherwise defaults to leaving everything in place (never
+# deletes real install data without either an explicit answer or an
+# explicit env var - see pytest_sessionfinish's own docstring).
+CLEANUP_ENV = os.environ.get("FLOW2_CLEANUP")
+
+# Things this run's fixtures actually created (never anything that
+# already existed under the same name) - see pytest_sessionfinish.
+_created_this_run = {"projects": [], "rooms": [], "users": []}
 
 # strings that show up when a CGI/SOAP call crashes, a C++ exception
 # escapes, or a SQL error leaks into a JSON/HTML response - if any of
@@ -286,8 +298,11 @@ def _create_user_if_missing(page, username, password, level_label, first_name, l
     """
     Creates `username` via Administration > Benutzer > Neuer Benutzer if it
     doesn't already exist in the user list. Idempotent (safe to call every
-    run) and returns True if the account exists afterward (whether it was
-    just created or already there), False if it could not be created.
+    run). Returns ("existing", True) if the account was already there,
+    ("created", True) if this call just made it, or (None, False) if it
+    couldn't be created - the distinction matters for cleanup, which
+    should only ever delete an account this suite itself created, never
+    one that happened to already exist under the same name.
 
     Scopes the new-user form's inputs to the panel actually containing the
     "Speichern" button, rather than the whole page: the page also has
@@ -297,14 +312,14 @@ def _create_user_if_missing(page, username, password, level_label, first_name, l
     clip metadata panel specifically.
     """
     if not _navigate_to_admin_users(page):
-        return False
+        return None, False
     if username in page.content():
-        return True
+        return "existing", True
 
     try:
         new_user_btn = _find_first(page, ['text=Neuer Benutzer', 'text=New User'], timeout=3000)
     except PlaywrightTimeoutError:
-        return False
+        return None, False
     new_user_btn.click(force=True)
     page.wait_for_timeout(1000)
 
@@ -325,7 +340,7 @@ def _create_user_if_missing(page, username, password, level_label, first_name, l
         }"""
     )
     if not found:
-        return False
+        return None, False
 
     panel = page.locator('[data-newuser-panel="1"]')
     fields = panel.locator('input, select')
@@ -342,7 +357,8 @@ def _create_user_if_missing(page, username, password, level_label, first_name, l
     _find_first(page, ['text=Speichern', 'text=Save'], timeout=3000).click(force=True)
     page.wait_for_timeout(2000)
 
-    return _navigate_to_admin_users(page) and username in page.content()
+    ok = _navigate_to_admin_users(page) and username in page.content()
+    return ("created", True) if ok else (None, False)
 
 
 @pytest.fixture(scope="session")
@@ -375,10 +391,12 @@ def ensure_lowpriv_user(_shared_session):
         home_path,
     )
     _shared_session.wait_for_timeout(1000)
-    ok = _create_user_if_missing(
+    status, ok = _create_user_if_missing(
         _shared_session, LOWPRIV_USER, LOWPRIV_PASSWORD, LOWPRIV_LEVEL_LABEL,
         "Flow2UiTest", "Lowpriv",
     )
+    if status == "created":
+        _created_this_run["users"].append(LOWPRIV_USER)
     if not ok:
         pytest.skip(
             f"could not create/find the '{LOWPRIV_USER}' test account - the admin "
@@ -548,6 +566,7 @@ def ensure_test_project(_shared_session):
     )
     if project_id is None:
         pytest.skip(f"could not create the '{TEST_PROJECT_NAME}' test project")
+    _created_this_run["projects"].append(project_id)
     return {"id": project_id, "requested_name": TEST_PROJECT_NAME}
 
 
@@ -593,6 +612,7 @@ def ensure_test_room(_shared_session):
     )
     if room_id is None:
         pytest.skip(f"could not create the '{TEST_ROOM_NAME}' test room")
+    _created_this_run["rooms"].append(room_id)
     return {"id": room_id, "requested_name": TEST_ROOM_NAME}
 
 
@@ -739,6 +759,182 @@ def editable_metadata_fields(page):
         'input[type="text"]:visible:not([placeholder]), '
         "textarea:visible"
     )
+
+
+def _cleanup_login(browser):
+    context = browser.new_context(ignore_https_errors=INSECURE_TLS)
+    page = context.new_page()
+    page.goto(FLOW2_URL, wait_until="networkidle", timeout=30000)
+    _do_login(page)
+    return context, page
+
+
+def _cleanup_project(page, project_id):
+    page.locator('a:has-text("Projekte"), a:has-text("Projects")').first.click(force=True)
+    page.wait_for_timeout(1500)
+    btn = page.locator(f'button[class*="ProjectList_SingleProject"][data-id="{project_id}"]')
+    if btn.count() == 0:
+        return False, "not found in the project list (already gone?)"
+    btn.first.dblclick(force=True)
+    page.wait_for_url("**/project/**", timeout=15000)
+    page.wait_for_timeout(1000)
+    dots = page.locator("svg.fa-ellipsis-v")
+    if dots.count() == 0:
+        return False, "no '...' menu on the project detail page"
+    dots.first.click(force=True)
+    page.wait_for_timeout(500)
+    try:
+        delete_item = _find_first(page, ['text=Projekt löschen', 'text=Delete Project'], timeout=3000)
+    except PlaywrightTimeoutError:
+        return False, "no 'Projekt löschen' entry in the '...' menu"
+    delete_item.click(force=True)
+    confirm = page.locator(".swal2-confirm")
+    try:
+        confirm.wait_for(state="visible", timeout=5000)
+    except PlaywrightTimeoutError:
+        return False, "delete confirmation popup never appeared"
+    confirm.click(force=True)
+    page.wait_for_timeout(1500)
+    return True, "deleted"
+
+
+def _cleanup_room(page, room_id):
+    """
+    Best-effort: RoomView.js's own delete menu entry is gated behind the
+    same `MetadataPermissionHelper.hasPermission` check as project
+    delete, but this install's rooms have their own real data-integrity
+    bug (see ensure_test_room) where nearly every metadata field,
+    including whatever the permission check reads off the room object,
+    comes back "notset" - so that check plausibly fails even for admin,
+    and the menu entry never renders at all. Confirmed missing on the
+    reference install; reported as a manual follow-up rather than
+    silently skipped.
+    """
+    page.locator('a:has-text("Rooms")').first.click(force=True)
+    page.wait_for_timeout(1500)
+    link = page.locator(f'a[href*="/room/{room_id}"]')
+    if link.count() == 0:
+        return False, "not found in the room list (already gone?)"
+    link.first.click(force=True)
+    page.wait_for_url("**/room/**", timeout=15000)
+    page.wait_for_timeout(1000)
+    dots = page.locator("svg.fa-ellipsis-v")
+    if dots.count() > 0:
+        dots.first.click(force=True)
+        page.wait_for_timeout(500)
+        try:
+            delete_item = _find_first(page, ['text=Room löschen', 'text=Delete Room'], timeout=2000)
+        except PlaywrightTimeoutError:
+            delete_item = None
+        if delete_item is not None:
+            delete_item.click(force=True)
+            confirm = page.locator(".swal2-confirm")
+            try:
+                confirm.wait_for(state="visible", timeout=5000)
+                confirm.click(force=True)
+                page.wait_for_timeout(1500)
+                return True, "deleted"
+            except PlaywrightTimeoutError:
+                return False, "delete confirmation popup never appeared"
+    return False, (
+        "no working delete option found (this install's own room "
+        "metadata bug appears to also hide the delete menu entry for "
+        "admin) - needs manual deletion"
+    )
+
+
+def _cleanup_user(page, username):
+    if not _navigate_to_admin_users(page):
+        return False, "could not reach Administration > Benutzer"
+    # scope to the specific row: find the row containing the username,
+    # then the Delete link inside that same row (several distinct users
+    # each have their own "Delete" link on this page, so a bare
+    # `text=Delete` locator alone can't tell them apart)
+    row_with_delete = page.evaluate(
+        """(username) => {
+            const rows = Array.from(document.querySelectorAll('tr, [class*="row"]'));
+            const row = rows.find(r => r.textContent.includes(username) && r.textContent.includes('Delete'));
+            if (!row) return false;
+            row.setAttribute('data-cleanup-row', '1');
+            return true;
+        }""",
+        username,
+    )
+    if not row_with_delete:
+        return False, "user row (with a Delete link) not found"
+    delete_link = page.locator('[data-cleanup-row="1"] >> text=Delete').first
+    delete_link.click(force=True)
+    confirm = page.locator(".swal2-confirm")
+    try:
+        confirm.wait_for(state="visible", timeout=5000)
+        confirm.click(force=True)
+    except PlaywrightTimeoutError:
+        pass  # some installs delete immediately with no confirm popup
+    page.wait_for_timeout(1500)
+    still_there = username in page.content()
+    return (not still_there), ("deleted" if not still_there else "still listed after clicking Delete")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """
+    Offers to delete whatever test_projects.py/test_rooms.py/
+    test_permissions.py created *this run* (never anything that already
+    existed under the same name - see `_created_this_run`'s own
+    docstring). Nothing to do, nothing asked, if nothing was created
+    (e.g. those tests were deselected, or everything they touch already
+    existed).
+
+    FLOW2_CLEANUP=1/0 skips the prompt for scripted/CI runs. Left unset,
+    this asks interactively when a real terminal is attached (`docker
+    run -it`) and otherwise defaults to leaving everything in place -
+    never deletes install data without either an explicit answer or an
+    explicit env var.
+    """
+    created = _created_this_run
+    if not (created["projects"] or created["rooms"] or created["users"]):
+        return
+
+    summary = []
+    if created["projects"]:
+        summary.append(f"{len(created['projects'])} project(s): {', '.join(created['projects'])}")
+    if created["rooms"]:
+        summary.append(f"{len(created['rooms'])} room(s): {', '.join(created['rooms'])}")
+    if created["users"]:
+        summary.append(f"{len(created['users'])} user(s): {', '.join(created['users'])}")
+    print(f"\nThis run created: {'; '.join(summary)}")
+
+    if CLEANUP_ENV is not None:
+        do_cleanup = CLEANUP_ENV == "1"
+        print(f"FLOW2_CLEANUP={CLEANUP_ENV} - {'cleaning up' if do_cleanup else 'leaving in place'}.")
+    elif sys.stdin.isatty():
+        answer = input("Clean up this run's test data now? [y/N]: ").strip().lower()
+        do_cleanup = answer in ("y", "yes")
+    else:
+        print(
+            "No terminal attached to ask (run with `docker run -it` for the "
+            "prompt, or set FLOW2_CLEANUP=1/0) - leaving test data in place."
+        )
+        do_cleanup = False
+
+    if not do_cleanup:
+        return
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context, page = _cleanup_login(browser)
+        try:
+            for project_id in created["projects"]:
+                ok, reason = _cleanup_project(page, project_id)
+                print(f"project {project_id}: {reason}" if not ok else f"project {project_id}: deleted")
+            for room_id in created["rooms"]:
+                ok, reason = _cleanup_room(page, room_id)
+                print(f"room {room_id}: {reason}")
+            for username in created["users"]:
+                ok, reason = _cleanup_user(page, username)
+                print(f"user {username}: {reason}")
+        finally:
+            context.close()
+            browser.close()
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
