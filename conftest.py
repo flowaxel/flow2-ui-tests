@@ -434,6 +434,168 @@ def lowpriv_logged_in_page(_lowpriv_session):
     return _lowpriv_session
 
 
+TEST_PROJECT_NAME = os.environ.get("FLOW2_TEST_PROJECT_NAME", "flow2uitest_project")
+TEST_ROOM_NAME = os.environ.get("FLOW2_TEST_ROOM_NAME", "flow2uitest_room")
+
+
+def _project_ids(page):
+    """
+    The id of every project currently in the flat "Projekte" list
+    specifically (`button.ProjectList_SingleProject`'s own `data-id`) -
+    not `get_by_text(name, exact=True)`, which this suite's first
+    attempt used and which turned out to unpredictably match either the
+    real list button *or* an unrelated same-named element elsewhere in
+    the page (the left sidebar independently renders its own project
+    tree, `ProjectTree_ProjectChild__*`, alongside the same list) -
+    `.first` then opened whichever the DOM happened to put first, not
+    necessarily the item actually wanted. Diffing a specific, scoped set
+    of ids before/after creation - the same approach `_room_ids` already
+    needed for a real backend bug (see `ensure_test_room`) - sidesteps
+    that ambiguity entirely instead of trying to make text matching
+    unique.
+    """
+    return set(
+        page.evaluate(
+            """() => Array.from(document.querySelectorAll('button.ProjectList_SingleProject__3EWky, button[class*="ProjectList_SingleProject"]'))
+                .map(el => el.getAttribute('data-id'))
+                .filter(Boolean)"""
+        )
+    )
+
+
+def _create_named_item(page, nav_selectors, new_button_selectors, name, id_fn):
+    """
+    Shared logic behind `ensure_test_project`/`ensure_test_room`: both
+    "Neues Projekt" and "Neuer Room" open the exact same kind of
+    SweetAlert2 name-prompt (a single text input, "Bestätigen"/
+    "Abbrechen"), confirmed by inspecting both live rather than assumed
+    from one. Always creates a fresh one and returns its id (via
+    `id_fn`'s before/after diff) - see `ensure_test_room`'s own
+    docstring for why room creation specifically can't be made
+    idempotent by name here.
+    """
+    nav = _find_first(page, nav_selectors, timeout=10000)
+    nav.click(force=True)
+    page.wait_for_timeout(1500)
+    before = id_fn(page)
+
+    # A real (non-forced) click, scrolled into view first: "Neues
+    # Projekt"/"Neuer Room" live in the sidebar's own project/room tree
+    # widget, which becomes a scrollable list once enough items exist -
+    # `force=True` bypasses Playwright's own actionability/visibility
+    # checks, so once the button scrolls out of the sidebar's visible
+    # area it can silently "click" nothing at all rather than erroring
+    # (found by this fixture reliably working with a handful of
+    # projects/rooms and silently failing once a dozen or so existed).
+    new_btn = _find_first(page, new_button_selectors, timeout=5000)
+    try:
+        new_btn.scroll_into_view_if_needed(timeout=5000)
+        new_btn.click(timeout=5000)
+    except PlaywrightTimeoutError:
+        return None
+    # #swal-input1 specifically, not the whole .swal2-input class: the
+    # popup's own template always renders a second, hidden .swal2-input
+    # alongside the real visible one (a SweetAlert2 element it doesn't
+    # use for this particular prompt type, left in the DOM either way) -
+    # `.first` on the class alone happens to land on the right one, but
+    # only by the accident of DOM order, not anything guaranteed.
+    swal_input = page.locator('#swal-input1')
+    try:
+        swal_input.wait_for(state="visible", timeout=10000)
+    except PlaywrightTimeoutError:
+        return None
+    swal_input.fill(name)
+    # "Neuer Room" additionally requires picking a Roomtyp from a
+    # <select> in the same popup ("Selection Room"/"Download Room"/
+    # "Upload Room") - leaving it unset was found to silently create a
+    # room literally named "notset" rather than validation-blocking the
+    # confirm click (a separate, real bug - see ensure_test_room).
+    # "Neues Projekt" has no such dropdown, so this is a no-op there.
+    room_type_select = page.locator('.swal2-popup select.swal2-select:visible')
+    if room_type_select.count() > 0:
+        room_type_select.first.select_option(index=1)
+    _find_first(page, ['text=Bestätigen', 'text=Confirm'], timeout=5000).click(force=True)
+    swal_input.wait_for(state="hidden", timeout=10000)
+    page.wait_for_timeout(2000)
+
+    new_ids = id_fn(page) - before
+    return next(iter(new_ids)) if new_ids else None
+
+
+@pytest.fixture(scope="session")
+def ensure_test_project(_shared_session):
+    """
+    Creates a project named TEST_PROJECT_NAME once per run, if missing -
+    just enough for test_projects.py to open a real, known detail page.
+    Does NOT test editing project metadata: reading
+    Flow2/pages/Projects/ProjectView.js's own "Projektdetails" panel
+    source (via this install's bundled source maps) shows it's built
+    entirely out of plain <p> text - no input, no pencil/save icon, no
+    edit affordance anywhere in that render path. Confirmed against the
+    live UI too (no svg.fa-pen anywhere on the page, the "..." menu has
+    delete/mass-clip-edit/room-conversion but no "edit project" entry,
+    clicking directly on the displayed name does nothing). Editing
+    project-level fields (name, status, owner, description) after
+    creation isn't a feature this install's flow2 build exposes at all -
+    there's nothing here for a save round-trip test to exercise.
+    """
+    project_id = _create_named_item(
+        _shared_session,
+        ['a:has-text("Projekte")', 'a:has-text("Projects")'],
+        ['text=Neues Projekt', 'text=New Project'],
+        TEST_PROJECT_NAME,
+        _project_ids,
+    )
+    if project_id is None:
+        pytest.skip(f"could not create the '{TEST_PROJECT_NAME}' test project")
+    return {"id": project_id, "requested_name": TEST_PROJECT_NAME}
+
+
+def _room_ids(page):
+    return set(
+        page.evaluate(
+            """() => Array.from(document.querySelectorAll('a[href*="/room/"]'))
+                .map(a => a.getAttribute('href').match(/\\/room\\/(\\d+)/))
+                .filter(Boolean)
+                .map(m => m[1])"""
+        )
+    )
+
+
+@pytest.fixture(scope="session")
+def ensure_test_room(_shared_session):
+    """
+    Same mechanics as `ensure_test_project` (see `_create_named_item`),
+    but room creation has its own real, separate bug worth calling out
+    explicitly: the room-creation popup's "title" field *is* sent
+    correctly (confirmed via the WebSocket frame:
+    {"action":"showroomcreate","params":{"metadata":{"title":"...",
+    ...}}}), but the backend's own response for the newly created room
+    comes back with `title`, `owner`, `roomtype` and nearly every other
+    metadata field literally set to the string "notset" - not the
+    submitted value, not empty. See
+    test_rooms.py::test_room_creation_persists_the_given_title, which
+    asserts on this directly (and is expected to fail on this
+    install - that's the point, not a test bug). Both projects and
+    rooms are created fresh every run rather than reused by name
+    (neither install feature makes a name-based existence check fully
+    reliable - see `_project_ids`'s docstring for the project side of
+    that), so repeated runs against the same install will accumulate
+    test projects/rooms over time; not cleaned up automatically since
+    deleting isn't something this suite otherwise does to real data.
+    """
+    room_id = _create_named_item(
+        _shared_session,
+        ['a:has-text("Rooms")'],
+        ['text=Neuer Room', 'text=New Room'],
+        TEST_ROOM_NAME,
+        _room_ids,
+    )
+    if room_id is None:
+        pytest.skip(f"could not create the '{TEST_ROOM_NAME}' test room")
+    return {"id": room_id, "requested_name": TEST_ROOM_NAME}
+
+
 @pytest.fixture
 def picture_fixture_path():
     return os.path.join(os.path.dirname(__file__), "fixtures", "test_picture.png")

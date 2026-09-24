@@ -85,6 +85,7 @@ Optional environment variables:
 | `FLOW2_TEST_PERMISSIONS`     | `1`     | Set to `0` to skip the admin-vs-restricted-user rights matrix (`test_permissions.py`) entirely.  |
 | `FLOW2_LOWPRIV_USER` / `FLOW2_LOWPRIV_PASSWORD` | `flow2uitest_lowpriv` / `TestLowpriv2026!` | Credentials for the restricted account `test_permissions.py` creates (if missing) and logs into. Point at an existing low-privilege account instead if you'd rather not let the suite create one. |
 | `FLOW2_LOWPRIV_LEVEL_LABEL`  | `Level 1` | The exact option text to pick in the admin "Neuer Benutzer" form's Userlevel dropdown when creating the restricted account. |
+| `FLOW2_TEST_PROJECT_NAME` / `FLOW2_TEST_ROOM_NAME` | `flow2uitest_project` / `flow2uitest_room` | Name given to the project/room `test_projects.py`/`test_rooms.py` create each run. |
 
 Pass extra `pytest` arguments after the image name, e.g.
 `docker run --rm -e ... flow2-ui-tests -k test_login -v`.
@@ -166,6 +167,24 @@ tool, not something you'd put behind a public URL as-is.
   gets full, unrestricted access to every Administration tab (Benutzer,
   System-Einstellungen, ...) - only `deleteclip` is actually enforced,
   both in the granting config and in what's rendered.
+- `test_projects.py` / `test_rooms.py` - create a real project/room and
+  check its detail page shows it correctly. No edit-round-trip test for
+  either: reading this install's own bundled React source
+  (`Flow2/pages/Projects/ProjectView.js`, `Flow2/pages/Rooms/RoomView.js`)
+  shows both "details" panels are built entirely out of plain read-only
+  `<p>` text - no input field, no pencil/save icon, no edit menu entry
+  anywhere in that render path, confirmed against the live UI too.
+  Room *creation* itself has a real, separate bug worth testing
+  directly, though: the popup's "title" field is sent to the backend
+  correctly (confirmed via the WebSocket frame), but the backend's own
+  response for the newly created room comes back with `title`, `owner`,
+  `roomtype` and nearly every other metadata field literally set to the
+  string `"notset"` - not the submitted value, not empty either. Both
+  fixtures create a fresh project/room every run rather than reusing one
+  by name (this install's own project-tree/room-tree text isn't a
+  reliable enough handle to find a specific one back safely - see
+  `ensure_test_project`'s docstring in conftest.py), so repeated runs
+  will accumulate test projects/rooms on the target install over time.
 
 ## Performance timings
 
